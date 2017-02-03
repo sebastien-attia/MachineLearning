@@ -1,20 +1,12 @@
 import numpy as np
 
-def sigmoid(z):
-    return (1/(1+np.exp(-z)))
-
-def derivative_sigmoid(z):
-    return sigmoid(z)*(1-sigmoid(z))
-
-def least_square_error(y, output):
-    diff = output - y
-    return np.dot(np.transpose(diff), diff)/2
-
-def least_square_error_gradient(y, output):
-    return (output - y)
+from functions_library import (
+    sigmoid, derivative_sigmoid,
+    least_square_error, least_square_error_gradient
+)
 
 class NeuralNetwork:
-    def __init__(self, layers_def, activation_fct=(sigmoid, derivative_sigmoid), cost_fct=(least_square_error, least_square_error_gradient), init_epsilon=1):
+    def __init__(self, layers_def, activation_fct=(sigmoid, derivative_sigmoid), cost_fct=(least_square_error, least_square_error_gradient), thetas=None, init_epsilon=1):
         '''
         layers_def is an array defining the number of neurons in each layer.
         layers_def[0] is the input layer.
@@ -29,7 +21,12 @@ class NeuralNetwork:
 
         self.layers_def = layers_def
 
-        self.thetas = [compute_rand(layers_def[l], layers_def[l-1]+1, init_epsilon)  for l in range(1, len(layers_def))]
+        if thetas:
+            self.thetas = thetas
+            self._check_thetas_shape(layers_def, thetas)
+        else:
+            self.thetas = [compute_rand(layers_def[l], layers_def[l-1]+1, init_epsilon)  for l in range(1, len(layers_def))]
+
         self.activation_fct = activation_fct[0]
         self.derivative_activation_fct = activation_fct[1]
         self.cost_fct = cost_fct[0]
@@ -40,6 +37,8 @@ class NeuralNetwork:
 
         for mini_batch in mini_batches:
             self._train_mini_batch(mini_batch, learning_rate, reg_lambda, debug)
+
+        return self._cost(data_set, reg_lambda)
 
     def predict(self, input):
         result = self._forward_propagation(input)
@@ -77,27 +76,49 @@ class NeuralNetwork:
         delta = None
         is_first = True
 
-        for (i, theta) in reversed(list(enumerate(self.thetas))):
-            if i == 0:
+        for (layer, theta) in reversed(list(enumerate(self.thetas))):
+            if layer == 0:
                 break
 
-            input_current_layer = output_layers[i][0]
+            input_current_layer = output_layers[layer][0]
 
             if is_first:
-                output_current_layer = output_layers[i][1]
+                output_current_layer = output_layers[layer][1]
                 delta = self.gradient_cost_fct(y, output_current_layer)
                 is_first = False
             else:
-                delta = np.dot(np.transpose(self._remove_bias_column(self.thetas[i+1])), delta) * self.derivative_activation_fct(input_current_layer)
+                delta = np.dot(np.transpose(self._remove_bias_column(self.thetas[layer+1])), delta) * self.derivative_activation_fct(input_current_layer)
+
+            output_previous_layer = np.append([1], output_layers[layer-1][1])
+            main_term = np.outer(delta, np.transpose(output_previous_layer))
+            reg_term = reg_lambda * self._zero_bias_thetas(theta)
 
             if debug:
-                self._gradient_checking(x, i, delta)
+                self._gradient_checking(x, y, reg_lambda, layer, main_term, reg_term)
 
-            output_previous_layer = np.append([1], output_layers[i-1][1])
-            term_1 = np.outer(delta, np.transpose(output_previous_layer))
-            term_2 = reg_lambda * self._zero_bias_thetas(theta)
+            Deltas[layer] = Deltas[layer] + (main_term + reg_term)/size_mini_batch
 
-            Deltas[i] = Deltas[i] + (term_1 + term_2)/size_mini_batch
+    def _cost(self, data_set, reg_lambda, thetas=None):
+        if not thetas:
+            thetas = self.thetas
+
+        m = len(data_set)
+        def output(x):
+            return self._get_output(self._forward_propagation(x, thetas))
+
+        main_cost = -sum([self.cost_fct(y, output(x)) for x, y in data_set])/m
+
+        def _sum_theta_square(theta):
+            shape = theta.shape
+            result = 0
+            for i in range(shape[0]):
+                for j in range(1, shape[1]):
+                    result += theta[i][j]
+            return result
+
+        reg = reg_lambda * sum([_sum_theta_square(t) for t in thetas])/(2*m)
+        result = main_cost + reg
+        return np.array([result, main_cost, reg])
 
     def _zero_bias_thetas(self, theta):
         result = np.copy(theta)
@@ -107,13 +128,48 @@ class NeuralNetwork:
     def _remove_bias_column(self, theta):
         return np.delete(np.copy(theta), 0, 1)
 
-    def _gradient_checking(self, x, layer, delta):
-        lthetas = self.thetas[layer]
-        #print(len(lthetas))
-        #print(lthetas)
+    def _gradient_checking(self, x, y, reg_lambda, layer, main_term, reg_term):
+        epsilon = 0.01
+        precision = np.array([ 0.001, 0.001, 0.001 ])
+
+        lthetas = list(self.thetas)
+
+        data_set = ((x, y),)
+
+        shape = lthetas[layer].shape
+
+        for i in range(shape[0]):
+            for j in range(shape[1]):
+                lthetas[layer] = np.copy(self.thetas[layer])
+                lthetas[layer][i][j] += epsilon
+                h_p_e = self._cost(data_set, reg_lambda, lthetas)
+
+                lthetas[layer] = np.copy(self.thetas[layer])
+                lthetas[layer][i][j] -= epsilon
+                h_m_e = self._cost(data_set, reg_lambda, lthetas)
+
+                exp_partial_derivative = (h_p_e - h_m_e)/(2.*epsilon)
+
+                main_pd = main_term[i, j]
+                reg_pd = reg_term[i, j]
+                partial_derivative = np.array([ main_pd+reg_pd, main_pd, reg_pd ])
+
+                err = np.less(
+                    np.fabs(partial_derivative -  exp_partial_derivative),
+                    precision
+                )
 
     def _get_output(self, output_layers):
         return output_layers[len(output_layers)-1][1]
 
     def _add_bias_node(self, array):
         return np.append([1], array)
+
+    def _check_thetas_shape(self, layers_def, thetas):
+        if len(thetas) != (len(layers_def)-1):
+            raise RuntimeError("Not valid dimension for the weights: expected[%s], get[%s]" % ((len(layers_def)-1), len(thetas)))
+
+        for l in range(1, len(layers_def)):
+            expected_shape = (layers_def[l], layers_def[l-1]+1)
+            if thetas[l-1].shape != expected_shape:
+                raise RuntimeError("For the layer [%s], the expected dim is [%s], but get [%s]" % (l, expected_shape, thetas[l].shape))
